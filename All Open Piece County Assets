@@ -1,0 +1,607 @@
+#PROJECT 4: Department Engagement
+#By Rebecca Higbee
+
+###This R script aggregates information from Project 2 and Project 3, showing 
+###information for all assets on Open Pierce County.
+
+###########################DATASETS##############################################################
+
+# FOR DATASETS ONLY -------------------------------------------------------
+# Working Directory -----------------------------------------------
+setwd("M:/Project 4")
+
+
+# Libraries ---------------------------------------------------------------
+library(tidyverse)
+library(RSocrata)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+
+# Load data from Socrata  ------------------------------------------------------------
+APIKey <- "drmx3t1qo8iymm1qzc5c7ph0t" #API Key: UnauthorizedEncampments
+APISecret <- "65nxlxzoso7068rafu737tcdmyw0f1x52suuo1r7bwe6ng2za9"
+
+# Data Import -------------------------------------------------------------
+aiorig <- read.socrata(url = "https://internal.open.piercecountywa.gov/resource/gndc-q36z.csv", email = APIKey, password = APISecret) # dataset
+aaorig <- read.socrata(url = "https://internal.open.piercecountywa.gov/resource/yuxg-i93a.csv", email = APIKey, password = APISecret) # dataset
+
+# Clean Datasets to Include Only Necessary Columns ---------------------------
+ai <- aiorig %>% 
+  select(
+    UID = uid, #unique identifier of assets
+    Name = name, #text
+    Type = type, #all are datasets
+    Audience = audience, #audience type
+    DataLastUpdated = last_data_updated_date, #dates in 2018 up to present
+    PublishingTimePeriod = publishing_timeperiodcovered, #dates in 2018 up to present
+    Tags = tags, #Values: T/F
+    Contact.Email = contact_email, #text
+    PublishingUpdateFrequency = publishing_updatefrequency, #Values: Daily, Weekly, Monthly, Quarterly, Annually
+    MetadataLastUpdated = last_metadata_updated_date, #dates in 2018 up to present
+    Description = description, #text
+    RowLabel = row_label, #text
+    Category = category, #text
+    url, #text
+    DataCustodian = dataprocedure_datacustodian, #text, the data custodian's name
+    PublishingDepartment = publishing_department, #text
+    AutomationType= dataprocedure_automationtype) %>% #Values: Gateway, Direct, ESPI, no
+  filter(Type == "dataset")
+
+aa <- aaorig %>% 
+  select( 
+    UID = asset_uid, #unique asset identifier
+    Value = value, #number of views (from 0-number of views)
+    Timestamp = timestamp, #dates in 2018 up to present
+    UserSegment = user_segment, #Values: anonymous, community_user, site_member
+    AssetType = asset_type) %>% #Values: dataset
+  filter(AssetType == "dataset")
+
+# Rank Assets -------------------------------------------------------------
+ds<- aa %>%
+  group_by(UID) %>%
+  summarize(TotalViewsEver = sum(Value, na.rm = TRUE)) %>% 
+  mutate(rank = rank(-TotalViewsEver, ties.method = "min")) #inverted and used rank to create 'ties'. Order uses the alpha/numeric order of UID to sort ties
+
+# Frequency of Use --------------------------------------------------------
+d1 <- aa %>% 
+  mutate(date = (substr(Timestamp, 0, 10))) %>% 
+  mutate(date = as.Date(date, format="%m/%d/%Y")) %>% 
+  mutate(year = year(date), month = month(date)) %>%
+  group_by(UserSegment, UID, year, month) %>%
+  summarize(ViewsPerMonth = sum(Value, na.rm = TRUE)) %>%
+  pivot_wider(names_from = UserSegment, values_from = ViewsPerMonth) %>%
+  mutate(TotalMonthViews = rowSums(cbind(anonymous, community_user, site_member), na.rm=T)) %>%
+  mutate(PublicTotalMonthViews = rowSums(cbind(anonymous, community_user), na.rm=T)) %>%
+  mutate(StaffTotalMonthViews = rowSums(cbind(site_member), na.rm=T)) %>% 
+  group_by(UID) %>%
+  #Both of these below is only by asset, not sum of the whole column
+  mutate(TotalStaffViewsEver = sum(StaffTotalMonthViews, na.rm = TRUE)) %>% 
+  mutate(TotalPublicViewsEver = sum(PublicTotalMonthViews, na.rm = TRUE))
+
+
+# Left Join d1 & ds into d-------------------------------------------------------
+d<-left_join(d1, ds, by = c("UID" = "UID"))
+options(digits = 2)
+
+
+# Now working with the ai dataset to make d2 ------------------------------
+d2 <- ai %>%
+  mutate(MetadataLastUpdated = (substr(MetadataLastUpdated, 0, 10))) %>% #substr takes part of the characters
+  mutate(MetadataLastUpdated = as.Date(MetadataLastUpdated)) %>% #convert to date type
+  mutate(DataLastUpdated = (substr(DataLastUpdated, 0, 10))) %>% #substr takes part of the characters
+  mutate(DataLastUpdated = as.Date(DataLastUpdated)) %>%  #convert to date type
+  mutate(Today = as.Date(now())) %>% #declare variable for today to clean up following lines of script
+  mutate(DaysSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "days"))) %>% #Days Since Last Update
+  mutate(WeeksSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "weeks"))) %>% #diff in weeks
+  mutate(MonthsSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "months"))) %>% #diff in months
+  mutate(QuartersSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "months")/ 3)) %>% #diff in months
+  mutate(YearsSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "years"))) %>% #diff in months 
+  #The following satisfies output "Is 1.5(PUF)>11 years?"
+  mutate(IsOverUpdateThreshold = ifelse(PublishingUpdateFrequency == "Annual" & YearsSinceLastUpdate > 1.5, "Yes",
+                                        ifelse(PublishingUpdateFrequency == "Quarterly" & QuartersSinceLastUpdate > 1.5, "Yes",
+                                               ifelse(PublishingUpdateFrequency == "Monthly" & MonthsSinceLastUpdate > 1.5, "Yes",
+                                                      ifelse(PublishingUpdateFrequency == "Weekly" & WeeksSinceLastUpdate > 1.5, "Yes",
+                                                             ifelse(PublishingUpdateFrequency == "Daily" & DaysSinceLastUpdate > 1.5, "Yes", "No")))))) %>%
+  #Creating Tags column
+  mutate(Tags = case_when(Tags == "" ~ "No", TRUE ~ "Yes")) %>%
+  #Creating IsAutomated column
+  mutate(Automated = case_when(AutomationType=="" ~ "No", TRUE ~ "Yes")) %>%
+  #Creating Is 1.5(LUD)>11 years?
+  mutate(IsOver11years = case_when(YearsSinceLastUpdate>11 ~ "Yes", TRUE ~"No")) %>% 
+  #Creating the MetadataComplete column
+  mutate(MetadataComplete = case_when((Contact.Email=="" | Description=="" | Tags=="No" | Name=="" | DataLastUpdated=="" | PublishingUpdateFrequency=="" | 
+                                         RowLabel=="" | Category=="" | DataCustodian=="" | PublishingDepartment=="" | MetadataLastUpdated=="") ~ "No", TRUE ~ "Yes"))
+  
+gc()
+
+# Combine into one dataset ------------------------------------------------
+dd<-left_join(d2, d, by = c("UID" = "UID"))
+
+dd<-dd %>%
+  mutate(Partitioning = cut(TotalViewsEver, quantile(TotalViewsEver,na.rm = TRUE, probs = c(0, .4, .7, 1)), include.lowest = TRUE, labels = FALSE)) %>% 
+  #Create Valuation Column
+  mutate(ValuationOfAsset = ifelse((IsOverUpdateThreshold == "Yes" | IsOverUpdateThreshold == "No" | is.na(IsOverUpdateThreshold)) & (Partitioning == 1 | is.na(Partitioning)), "Low Value",
+                                   ifelse((IsOverUpdateThreshold =="No" | IsOverUpdateThreshold == "Yes" | is.na(IsOverUpdateThreshold)) & Partitioning == 2, "Medium Value",
+                                          ifelse(IsOverUpdateThreshold == "Yes" & Partitioning == 3, "Medium Value",
+                                                 ifelse((IsOverUpdateThreshold == "No" | is.na(IsOverUpdateThreshold)) & Partitioning == 3, "High Value",
+                                                        ifelse(IsOver11years == "Yes", "Low Value", "Low Value"))))))
+
+
+# Combine into the ultimate output dataset --------------------------------
+ultdata<-dd %>% 
+  select(UID, Title = Name, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, rank, DataCustodian, PublishingDepartment, DataLastUpdated, PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, ValuationOfAsset, Partitioning) %>% 
+  mutate(Rank = replace_na(rank, max(rank, na.rm = TRUE) + 1)) %>%
+  select(UID, Title, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, Rank, DataCustodian, PublishingDepartment, DataLastUpdated, PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, ValuationOfAsset) %>% 
+  replace(is.na(ultdata), "")
+  distinct()
+
+today = as.Date(Sys.Date())
+write.csv(ultdata, paste0(today,"_Proj2-Datasets-Only.csv"))
+
+gc()
+
+
+# Import Proj3 Datasets Only csv file -------------------------------------
+P3Excel=read.csv("P3Excel.csv", header=T)
+
+P3DatasetsOnly<-P3Excel %>% 
+  mutate(DatasetTitleReview = case_when(DatasetTitleReview == "N" ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(BriefDescription = case_when(BriefDescription == " N " ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(ColumnDescription = case_when(ColumnDescription == " N " ~ "No", TRUE ~ "Yes"))
+
+P3DatasetsOnly<-P3DatasetsOnly %>% 
+  select(Department=Department.x, UID, Title=Name, DatasetTitleReview, BriefDescription, ColumnDescription, RowLabelExists=RowLabel, UpdateFrequency=PublishUpdateFrequency, TagsExist=Tags.x, DataCustodianExists=DataCustodian, Licensing=Licensing.x, DataProvidedBy=DataProvidedBy.x, URL=URL.x, Contact=Contact.x)
+
+# Combine both Project 2 & 3 into Project 4 for Datasets Only -------------
+Proj4DatasetsOnly<-left_join(ultdata, P3DatasetsOnly, by = c("UID" = "UID"))
+
+gc()
+
+Proj4DatasetsOnly<-Proj4DatasetsOnly %>%
+  select(PublishingDepartment, #text
+         UID, #text
+         Title=Title.x, #text
+         Audience, #text
+         TotalPublicViewsEver, #text
+         TotalStaffViewsEver, #text
+         TotalViewsEver, #text
+         Rank, #text
+         ValuationOfAsset, #text
+         DataCustodian, #text
+         DataLastUpdated, #text
+         PublishingUpdateFrequency, #text
+         IsOverUpdateThreshold, #0=no,1=yes
+         IsOver11Years=IsOver11years, #0=no,1=yes
+         Tags=Tags.x, #Y/N
+         MetadataComplete, #0=no,1=yes
+         Automated, #0=no,1=yes
+         Department, #Y/N
+         DatasetTitleReview, #Y/N
+         BriefDescription, #Y/N
+         ColumnDescription, #Y/N
+         RowLabelExists, #Y/N
+         UpdateFrequency, #Y/N
+         Licensing, #Y/N
+         DataProvidedBy, #Y/N
+         DataCustodianExists, #Y/N
+         URL, #Y/N
+         Contact) %>% #Y/N
+  mutate(Type = "dataset")
+
+#Rearrange where Type is
+Proj4DatasetsOnly<-Proj4DatasetsOnly %>%
+  select(PublishingDepartment, #text
+         Type, #text
+         UID, #text
+         Title, #text
+         Audience, #text
+         TotalPublicViewsEver, #text
+         TotalStaffViewsEver, #text
+         TotalViewsEver, #text
+         Rank, #text
+         ValuationOfAsset, #text
+         DataCustodian, #text
+         DataLastUpdated, #text
+         PublishingUpdateFrequency, #text
+         IsOverUpdateThreshold, #Y/N
+         IsOver11Years, #Y/N
+         Tags, #Y/N
+         MetadataComplete, #Y/N
+         Automated, #Y/N
+         Department, #Y/N
+         DatasetTitleReview, #Y/N
+         BriefDescription, #Y/N
+         ColumnDescription, #Y/N
+         RowLabelExists, #Y/N
+         UpdateFrequency, #Y/N
+         Licensing, #Y/N
+         DataProvidedBy, #Y/N
+         DataCustodianExists, #Y/N
+         URL, #Y/N
+         Contact) %>% #Y/N
+  replace(is.na(Proj4DatasetsOnly), "")
+
+write.csv(Proj4DatasetsOnly, paste0("Proj4-Datasets-Only-Final.csv"), row.names=FALSE)
+
+#####################################Sweep Everything#################################################
+
+
+
+##########################################CHARTS######################################################
+# Working Directory -----------------------------------------------
+setwd("M:/Project 4")
+
+
+# Libraries ---------------------------------------------------------------
+library(tidyverse)
+library(RSocrata)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+
+# Load data from Socrata  ------------------------------------------------------------
+APIKey <- "drmx3t1qo8iymm1qzc5c7ph0t" #API Key: UnauthorizedEncampments
+APISecret <- "65nxlxzoso7068rafu737tcdmyw0f1x52suuo1r7bwe6ng2za9"
+
+# Data Import -------------------------------------------------------------
+aiorig <- read.socrata(url = "https://internal.open.piercecountywa.gov/resource/gndc-q36z.csv", email = APIKey, password = APISecret) # dataset
+aaorig <- read.socrata(url = "https://internal.open.piercecountywa.gov/resource/yuxg-i93a.csv", email = APIKey, password = APISecret) # dataset
+
+# Clean Datasets to Include Only Necessary Columns ---------------------------
+ai <- aiorig %>% 
+  select(
+    UID = uid, #unique identifier of assets
+    Name = name, #text
+    Type = type, #all are datasets
+    Audience = audience, #audience type
+    DataLastUpdated = last_data_updated_date, #dates in 2018 up to present
+    PublishingTimePeriod = publishing_timeperiodcovered, #dates in 2018 up to present
+    Tags = tags, #Values: T/F
+    Contact.Email = contact_email, #text
+    PublishingUpdateFrequency = publishing_updatefrequency, #Values: Daily, Weekly, Monthly, Quarterly, Annually
+    MetadataLastUpdated = last_metadata_updated_date, #dates in 2018 up to present
+    Description = description, #text
+    RowLabel = row_label, #text
+    Category = category, #text
+    url, #text
+    DataCustodian = dataprocedure_datacustodian, #text, the data custodian's name
+    PublishingDepartment = publishing_department, #text
+    AutomationType= dataprocedure_automationtype) %>% #Values: Gateway, Direct, ESPI, no
+  filter(Type == "chart")
+
+aa <- aaorig %>% 
+  select( 
+    UID = asset_uid, #unique asset identifier
+    Value = value, #number of views (from 0-number of views)
+    Timestamp = timestamp, #dates in 2018 up to present
+    UserSegment = user_segment, #Values: anonymous, community_user, site_member
+    AssetType = asset_type) %>% #Values: dataset
+  filter(AssetType == "chart")
+
+# Rank Assets -------------------------------------------------------------
+ds<- aa %>%
+  group_by(UID) %>%
+  summarize(TotalViewsEver = sum(Value, na.rm = TRUE)) %>% 
+  mutate(rank = rank(-TotalViewsEver, ties.method = "min")) #inverted and used rank to create 'ties'. Order uses the alpha/numeric order of UID to sort ties
+
+
+# Frequency of Use --------------------------------------------------------
+d1 <- aa %>% 
+  mutate(date = (substr(Timestamp, 0, 10))) %>% 
+  mutate(date = as.Date(date, format="%m/%d/%Y")) %>% 
+  mutate(year = year(date), month = month(date)) %>%
+  group_by(UserSegment, UID, year, month) %>%
+  summarize(ViewsPerMonth = sum(Value, na.rm = TRUE)) %>%
+  pivot_wider(names_from = UserSegment, values_from = ViewsPerMonth) %>%
+  mutate(TotalMonthViews = rowSums(cbind(anonymous, community_user, site_member), na.rm=T)) %>%
+  mutate(PublicTotalMonthViews = rowSums(cbind(anonymous, community_user), na.rm=T)) %>%
+  mutate(StaffTotalMonthViews = rowSums(cbind(site_member), na.rm=T)) %>% 
+  group_by(UID) %>%
+  #Both of these below is only by asset, not sum of the whole column
+  mutate(TotalStaffViewsEver = sum(StaffTotalMonthViews, na.rm = TRUE)) %>% 
+  mutate(TotalPublicViewsEver = sum(PublicTotalMonthViews, na.rm = TRUE))
+
+
+# Left Join d1 & ds into d-------------------------------------------------------
+d<-left_join(d1, ds, by = c("UID" = "UID"))
+options(digits = 2)
+
+# Now working with the ai dataset to make d2 ------------------------------
+d2 <- ai %>%
+  mutate(MetadataLastUpdated = (substr(MetadataLastUpdated, 0, 10))) %>% #substr takes part of the characters
+  mutate(MetadataLastUpdated = as.Date(MetadataLastUpdated)) %>% #convert to date type
+  mutate(DataLastUpdated = (substr(DataLastUpdated, 0, 10))) %>% #substr takes part of the characters
+  mutate(DataLastUpdated = as.Date(DataLastUpdated)) %>%  #convert to date type
+  mutate(Today = as.Date(now())) %>% #declare variable for today to clean up following lines of script
+  mutate(DaysSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "days"))) %>% #Days Since Last Update
+  mutate(WeeksSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "weeks"))) %>% #diff in weeks
+  mutate(MonthsSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "months"))) %>% #diff in months
+  mutate(QuartersSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "months")/ 3)) %>% #diff in months
+  mutate(YearsSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "years"))) %>% #diff in months 
+  #The following satisfies output "Is 1.5(PUF)>11 years?"
+  mutate(IsOverUpdateThreshold = ifelse(PublishingUpdateFrequency == "Annual" & YearsSinceLastUpdate > 1.5, "Yes",
+                                        ifelse(PublishingUpdateFrequency == "Quarterly" & QuartersSinceLastUpdate > 1.5, "Yes",
+                                               ifelse(PublishingUpdateFrequency == "Monthly" & MonthsSinceLastUpdate > 1.5, "Yes",
+                                                      ifelse(PublishingUpdateFrequency == "Weekly" & WeeksSinceLastUpdate > 1.5, "Yes",
+                                                             ifelse(PublishingUpdateFrequency == "Daily" & DaysSinceLastUpdate > 1.5, "Yes", "No")))))) %>%
+  #Creating Tags colum
+  mutate(Tags = case_when(Tags == "" ~ "No", TRUE ~ "Yes")) %>%
+  #Creating IsAutomated column
+  mutate(Automated = case_when(AutomationType=="" ~ "No", TRUE ~ "Yes")) %>%
+  #Creating Is 1.5(LUD)>11 years?
+  mutate(IsOver11years = case_when(YearsSinceLastUpdate>11 ~ "Yes", TRUE ~"No")) %>% 
+  #Creating the MetadataComplete column
+  mutate(MetadataComplete = case_when((Contact.Email=="" | Description=="" | Tags=="No" | Name=="" | DataLastUpdated=="" | PublishingUpdateFrequency=="" | 
+                                         RowLabel=="" | Category=="" | DataCustodian=="" | PublishingDepartment=="" | MetadataLastUpdated=="") ~ "No", TRUE ~ "Yes"))
+
+gc()
+
+# Combine into one dataset ------------------------------------------------
+dd<-left_join(d2, d, by = c("UID" = "UID"))
+
+dd<-dd %>%
+  mutate(Partitioning = cut(TotalViewsEver, quantile(TotalViewsEver,na.rm = TRUE, probs = c(0, .4, .7, 1)), include.lowest = TRUE, labels = FALSE)) %>% 
+  #Create Valuation Column
+  mutate(ValuationOfAsset = ifelse((IsOverUpdateThreshold == "Yes" | IsOverUpdateThreshold == "No" | is.na(IsOverUpdateThreshold)) & (Partitioning == 1 | is.na(Partitioning)), "Low Value",
+                                   ifelse((IsOverUpdateThreshold =="No" | IsOverUpdateThreshold == "Yes" | is.na(IsOverUpdateThreshold)) & Partitioning == 2, "Medium Value",
+                                          ifelse(IsOverUpdateThreshold == "Yes" & Partitioning == 3, "Medium Value",
+                                                 ifelse((IsOverUpdateThreshold == "No" | is.na(IsOverUpdateThreshold)) & Partitioning == 3, "High Value",
+                                                        ifelse(IsOver11years == "Yes", "Low Value", "Low Value"))))))
+
+
+# Combine into the ultimate output dataset --------------------------------
+ultdata<-dd %>% 
+  select(UID, Title = Name, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, rank, DataCustodian, PublishingDepartment, DataLastUpdated, PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, ValuationOfAsset, Partitioning) %>% 
+  mutate(Rank = replace_na(rank, max(rank, na.rm = TRUE) + 1)) %>%
+  select(UID, Title, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, Rank, DataCustodian, PublishingDepartment, DataLastUpdated, PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, ValuationOfAsset) %>% 
+  replace(is.na(ultdata), "")
+  distinct()
+
+today = as.Date(Sys.Date())
+write.csv(ultdata, paste0(today,"Project2-Charts-Only.csv"))
+
+gc()
+
+# Import Proj3 Charts Only csv file -------------------------------------
+P3ExcelCharts=read.csv("P3ExcelCharts.csv", header=T)
+
+P3ExcelCharts<-P3ExcelCharts %>% 
+  mutate(TitleStandards = case_when(TitleStandards == "N" ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(Colors = case_when(Colors == " N " ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(CombinationChart = case_when(CombinationChart == " N " ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(ChartType = case_when(ChartType == "N" ~ "No", TRUE ~ "Yes"))
+
+# Combine both Project 2 & 3 into Project 4 for Charts Only -------------
+Proj4ChartsOnly<-left_join(ultdata, P3ExcelCharts, by = c("UID" = "UID"))
+
+gc()
+
+Proj4ChartsOnly<-Proj4ChartsOnly %>% 
+  select(PublishingDepartment, UID, Title=Title.x, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, DataCustodian, DataLastUpdated,
+         PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, TitleStandards, Colors, CombinationChart, ChartType, ValuationOfAsset) %>% 
+  mutate(Type = "chart")
+
+Proj4ChartsOnly<-Proj4ChartsOnly %>% 
+  replace(is.na(Proj4ChartsOnly), "")
+
+write.csv(Proj4ChartsOnly, paste0("Proj4-Charts-Only-Final.csv"), row.names=FALSE)
+
+#####################################Sweep Everything#################################################
+
+
+
+
+##########################################Story######################################################
+# Working Directory -----------------------------------------------
+setwd("M:/Project 4")
+
+
+# Libraries ---------------------------------------------------------------
+library(tidyverse)
+library(RSocrata)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+
+# Load data from Socrata  ------------------------------------------------------------
+APIKey <- "drmx3t1qo8iymm1qzc5c7ph0t" #API Key: UnauthorizedEncampments
+APISecret <- "65nxlxzoso7068rafu737tcdmyw0f1x52suuo1r7bwe6ng2za9"
+
+# Data Import -------------------------------------------------------------
+aiorig <- read.socrata(url = "https://internal.open.piercecountywa.gov/resource/gndc-q36z.csv", email = APIKey, password = APISecret) # dataset
+aaorig <- read.socrata(url = "https://internal.open.piercecountywa.gov/resource/yuxg-i93a.csv", email = APIKey, password = APISecret) # dataset
+
+# Clean Datasets to Include Only Necessary Columns ---------------------------
+ai <- aiorig %>% 
+  select(
+    UID = uid, #unique identifier of assets
+    Name = name, #text
+    Type = type, #all are datasets
+    Audience = audience, #audience type
+    DataLastUpdated = last_data_updated_date, #dates in 2018 up to present
+    PublishingTimePeriod = publishing_timeperiodcovered, #dates in 2018 up to present
+    Tags = tags, #Values: T/F
+    Contact.Email = contact_email, #text
+    PublishingUpdateFrequency = publishing_updatefrequency, #Values: Daily, Weekly, Monthly, Quarterly, Annually
+    MetadataLastUpdated = last_metadata_updated_date, #dates in 2018 up to present
+    Description = description, #text
+    RowLabel = row_label, #text
+    Category = category, #text
+    url, #text
+    DataCustodian = dataprocedure_datacustodian, #text, the data custodian's name
+    PublishingDepartment = publishing_department, #text
+    AutomationType= dataprocedure_automationtype) %>% #Values: Gateway, Direct, ESPI, no
+  filter(Type == "story")
+
+aa <- aaorig %>% 
+  select( 
+    UID = asset_uid, #unique asset identifier
+    Value = value, #number of views (from 0-number of views)
+    Timestamp = timestamp, #dates in 2018 up to present
+    UserSegment = user_segment, #Values: anonymous, community_user, site_member
+    AssetType = asset_type) %>% #Values: dataset
+  filter(AssetType == "story")
+
+# Rank Assets -------------------------------------------------------------
+ds<- aa %>%
+  group_by(UID) %>%
+  summarize(TotalViewsEver = sum(Value, na.rm = TRUE)) %>% 
+  mutate(rank = rank(-TotalViewsEver, ties.method = "min")) #inverted and used rank to create 'ties'. Order uses the alpha/numeric order of UID to sort ties
+
+# Frequency of Use --------------------------------------------------------
+d1 <- aa %>% 
+  mutate(date = (substr(Timestamp, 0, 10))) %>% 
+  mutate(date = as.Date(date, format="%m/%d/%Y")) %>% 
+  mutate(year = year(date), month = month(date)) %>%
+  group_by(UserSegment, UID, year, month) %>%
+  summarize(ViewsPerMonth = sum(Value, na.rm = TRUE)) %>%
+  pivot_wider(names_from = UserSegment, values_from = ViewsPerMonth) %>%
+  mutate(TotalMonthViews = rowSums(cbind(anonymous, community_user, site_member), na.rm=T)) %>%
+  mutate(PublicTotalMonthViews = rowSums(cbind(anonymous, community_user), na.rm=T)) %>%
+  mutate(StaffTotalMonthViews = rowSums(cbind(site_member), na.rm=T)) %>% 
+  group_by(UID) %>%
+  #Both of these below is only by asset, not sum of the whole column
+  mutate(TotalStaffViewsEver = sum(StaffTotalMonthViews, na.rm = TRUE)) %>% 
+  mutate(TotalPublicViewsEver = sum(PublicTotalMonthViews, na.rm = TRUE))
+
+
+# Left Join d1 & ds into d-------------------------------------------------------
+d<-left_join(d1, ds, by = c("UID" = "UID"))
+options(digits = 2)
+
+# Now working with the ai dataset to make d2 ------------------------------
+d2 <- ai %>%
+  mutate(MetadataLastUpdated = (substr(MetadataLastUpdated, 0, 10))) %>% #substr takes part of the characters
+  mutate(MetadataLastUpdated = as.Date(MetadataLastUpdated)) %>% #convert to date type
+  mutate(DataLastUpdated = (substr(DataLastUpdated, 0, 10))) %>% #substr takes part of the characters
+  mutate(DataLastUpdated = as.Date(DataLastUpdated)) %>%  #convert to date type
+  mutate(Today = as.Date(now())) %>% #declare variable for today to clean up following lines of script
+  mutate(DaysSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "days"))) %>% #Days Since Last Update
+  mutate(WeeksSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "weeks"))) %>% #diff in weeks
+  mutate(MonthsSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "months"))) %>% #diff in months
+  mutate(QuartersSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "months")/ 3)) %>% #diff in months
+  mutate(YearsSinceLastUpdate = as.numeric(time_length(interval(DataLastUpdated, Today), "years"))) %>% #diff in months 
+  #The following satisfies output "Is 1.5(PUF)>11 years?"
+  mutate(IsOverUpdateThreshold = ifelse(PublishingUpdateFrequency == "Annual" & YearsSinceLastUpdate > 1.5, "Yes",
+                                        ifelse(PublishingUpdateFrequency == "Quarterly" & QuartersSinceLastUpdate > 1.5, "Yes",
+                                               ifelse(PublishingUpdateFrequency == "Monthly" & MonthsSinceLastUpdate > 1.5, "Yes",
+                                                      ifelse(PublishingUpdateFrequency == "Weekly" & WeeksSinceLastUpdate > 1.5, "Yes",
+                                                             ifelse(PublishingUpdateFrequency == "Daily" & DaysSinceLastUpdate > 1.5, "Yes", "No")))))) %>%
+  #Creating Tags column
+  mutate(Tags = case_when(Tags == "" ~ "No", TRUE ~ "Yes")) %>%
+  #Creating IsAutomated column
+  mutate(Automated = case_when(AutomationType=="" ~ "No", TRUE ~ "Yes")) %>%
+  #Creating Is 1.5(LUD)>11 years?
+  mutate(IsOver11years = case_when(YearsSinceLastUpdate>11 ~ "Yes", TRUE ~"No")) %>% 
+  #Creating the MetadataComplete column
+  mutate(MetadataComplete = case_when((Contact.Email=="" | Description=="" | Tags=="No" | Name=="" | DataLastUpdated=="" | PublishingUpdateFrequency=="" | 
+                                         RowLabel=="" | Category=="" | DataCustodian=="" | PublishingDepartment=="" | MetadataLastUpdated=="") ~ "No", TRUE ~ "Yes"))
+
+
+gc()
+
+# Combine into one dataset ------------------------------------------------
+dd<-left_join(d2, d, by = c("UID" = "UID"))
+
+dd<-dd %>%
+  mutate(Partitioning = cut(TotalViewsEver, quantile(TotalViewsEver,na.rm = TRUE, probs = c(0, .4, .7, 1)), include.lowest = TRUE, labels = FALSE)) %>% 
+  #Create Valuation Column
+  mutate(ValuationOfAsset = ifelse((IsOverUpdateThreshold == "Yes" | IsOverUpdateThreshold == "No" | is.na(IsOverUpdateThreshold)) & (Partitioning == 1 | is.na(Partitioning)), "Low Value",
+                                   ifelse((IsOverUpdateThreshold =="No" | IsOverUpdateThreshold == "Yes" | is.na(IsOverUpdateThreshold)) & Partitioning == 2, "Medium Value",
+                                          ifelse(IsOverUpdateThreshold == "Yes" & Partitioning == 3, "Medium Value",
+                                                 ifelse((IsOverUpdateThreshold == "No" | is.na(IsOverUpdateThreshold)) & Partitioning == 3, "High Value",
+                                                        ifelse(IsOver11years == "Yes", "Low Value", "Low Value"))))))
+
+
+# Combine into the ultimate output dataset --------------------------------
+ultdata<-dd %>% 
+  select(UID, Title = Name, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, rank, DataCustodian, PublishingDepartment, DataLastUpdated, PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, ValuationOfAsset, Partitioning) %>% 
+  mutate(Rank = replace_na(rank, max(rank, na.rm = TRUE) + 1)) %>%
+  select(UID, Title, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, Rank, DataCustodian, PublishingDepartment, DataLastUpdated, PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, ValuationOfAsset) %>% 
+  replace(is.na(ultdata),"") %>% 
+  distinct()
+
+today = as.Date(Sys.Date())
+write.csv(ultdata, paste0(today,"Project2-Story-Only.csv"))
+
+gc()
+
+# Import Proj3 Charts Only csv file -------------------------------------
+P3ExcelStory=read.csv("P3ExcelStory.csv", header=T)
+
+P3ExcelStory<-P3ExcelStory %>% 
+  mutate(TitleStandards = case_when(TitleStandards == "N" ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(TitleFont = case_when(TitleFont == " N " ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(CorrespondingNarrative = case_when(CorrespondingNarrative == " N " ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(PeopleFirstLanguage = case_when(PeopleFirstLanguage == "N" ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(Images = case_when(Images == "N" ~ "No", TRUE ~ "Yes")) %>% 
+  mutate(ContactInformation = case_when(ContactInformation == "N" ~ "No", TRUE ~ "Yes")) %>%
+  mutate(Colors = case_when(Colors == "N" ~ "No", TRUE ~ "Yes"))
+
+# Combine both Project 2 & 3 into Project 4 for Charts Only -------------
+Proj4StoryOnly<-left_join(ultdata, P3ExcelStory, by = c("UID" = "UID"))
+
+gc()
+
+Proj4StoryOnly<-Proj4StoryOnly %>% 
+  select(PublishingDepartment, UID, Title=Title.x, Audience, TotalViewsEver, TotalStaffViewsEver, TotalPublicViewsEver, DataCustodian, DataLastUpdated,
+         PublishingUpdateFrequency, IsOverUpdateThreshold, IsOver11years, Tags, MetadataComplete, Automated, TitleStandards, TitleFont, CorrespondingNarrative, PeopleFirstLanguage, Images, ContactInformation, Colors, ValuationOfAsset) %>% 
+  mutate(Type = "story")
+
+Proj4StoryOnly<-Proj4StoryOnly %>% 
+  replace(is.na(Proj4StoryOnly), "")
+
+write.csv(Proj4StoryOnly, paste0("Proj4-Story-Only-Final.csv"), row.names=FALSE)
+
+###########################################SWEEP EVERYTHING#############################################
+
+
+
+###########################################Combine into Final Output####################################
+# Libraries ---------------------------------------------------------------
+library(tidyverse)
+library(RSocrata)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(data.table)
+
+setwd("N:/BNFFiles/BNF Shared/OPC/Project 4")
+
+# Load Data--------------------------------------------------------
+Stories <- read_csv("N:\\BNFFiles\\BNF Shared\\OPC\\Project 4\\Proj4-Story-Only-Final.csv")%>%
+  as.data.table()%>%
+  mutate(AssetType="Stories")
+
+Charts <- read_csv("N:\\BNFFiles\\BNF Shared\\OPC\\Project 4\\Proj4-Charts-Only-Final.csv")%>%
+  as.data.table()%>%
+  mutate(AssetType="Charts")
+
+Datasets <- read_csv("N:\\BNFFiles\\BNF Shared\\OPC\\Project 4\\Proj4-Datasets-Only-Final.csv")%>%
+  as.data.table()%>%
+  mutate(AssetType="Datasets")
+
+
+# Combine into Final Output Table -----------------------------------------
+Total<-bind_rows(Stories, Charts, Datasets)%>%
+  select(UID, Title, AssetType, PublishingDepartment, DataCustodian, Contact, URL, 
+         ValuationOfAsset, Audience:TotalPublicViewsEver, DataLastUpdated:Colors, CombinationChart, 
+         ChartType, IsOver11Years:DataCustodianExists)%>%
+  mutate(across(everything(), ~ replace(.x, is.na(.x), "")))
+
+
+# Consistently use "Yes" and "No" ---------------------------------------------
+Total<-Total %>% 
+  mutate(URL = ifelse(URL == 'Y', "Yes", ifelse(URL=='N', "No", ""))) %>% 
+  mutate(Contact = ifelse(Contact == 'Y', "Yes", ifelse(Contact=='N', "No", ""))) %>% 
+  mutate(Department = ifelse(Department == 'Y', "Yes", ifelse(Department=='N', "No", ""))) %>% 
+  mutate(RowLabelExists = ifelse(RowLabelExists == 'Y', "Yes", ifelse(RowLabelExists=='N', "No", ""))) %>% 
+  mutate(UpdateFrequency = ifelse(UpdateFrequency == 'Y', "Yes", ifelse(UpdateFrequency=='N', "No", ""))) %>%  
+  mutate(Licensing = ifelse(Licensing == 'Y', "Yes", ifelse(Licensing=='N', "No", ""))) %>% 
+  mutate(DataProvidedBy = ifelse(DataProvidedBy == 'Y', "Yes", ifelse(DataProvidedBy=='N', "No", ""))) %>% 
+  mutate(DataCustodianExists = ifelse(DataCustodianExists == 'Y', "Yes", ifelse(DataCustodianExists=='N', "No", "")))
+
+
+# Create Department Engagement csv----------------------------------------------------
+write.csv(Total, paste0("Department_Engagement.csv"), row.names=FALSE)
